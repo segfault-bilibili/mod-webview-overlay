@@ -1,0 +1,136 @@
+commit 45c67d338ef37347753a64716815a2f163b9ef55
+Author: webviewhack <webviewhack@webviewhack.org>
+Date:   Sun Sep 11 06:47:45 2022 +0000
+
+    disable aria-hidden
+
+diff --git a/android_webview/java/src/org/chromium/android_webview/common/ProductionSupportedFlagList.java b/android_webview/java/src/org/chromium/android_webview/common/ProductionSupportedFlagList.java
+index 5595a68b72eab..4b50344308e7f 100644
+--- a/android_webview/java/src/org/chromium/android_webview/common/ProductionSupportedFlagList.java
++++ b/android_webview/java/src/org/chromium/android_webview/common/ProductionSupportedFlagList.java
+@@ -371,6 +371,8 @@ public final class ProductionSupportedFlagList {
+                     "Enable to increase the cost of SendPendingAccessibilityEvents"),
+             Flag.baseFeature(ContentFeatures.WEBVIEW_THROTTLE_BACKGROUND_BEGIN_FRAME,
+                     "Enable to throttle begin frames when webview is not being drawn"),
++            Flag.baseFeature(BlinkFeatures.DISABLE_ARIA_HIDDEN,
++                    "Enable to ignore aria-hidden attribute so that accessibility service can access all subtrees"),
+             // Add new commandline switches and features above. The final entry should have a
+             // trailing comma for cleaner diffs.
+     };
+diff --git a/chrome/browser/about_flags.cc b/chrome/browser/about_flags.cc
+index d90bc7860cf31..6dc301dbaad55 100644
+--- a/chrome/browser/about_flags.cc
++++ b/chrome/browser/about_flags.cc
+@@ -9343,6 +9343,11 @@ const FeatureEntry kFeatureEntries[] = {
+      flag_descriptions::kSyncAccessHandleAllSyncSurfaceDescription, kOsAll,
+      FEATURE_VALUE_TYPE(blink::features::kSyncAccessHandleAllSyncSurface)},
+ 
++    {"disable-aria-hidden",
++     flag_descriptions::kDisableAriaHiddenName,
++     flag_descriptions::kDisableAriaHiddenDescription, kOsAll,
++     FEATURE_VALUE_TYPE(blink::features::kDisableAriaHidden)},
++
+     {"webauthn-conditional-ui", flag_descriptions::kWebAuthnConditionalUIName,
+      flag_descriptions::kWebAuthnConditionalUIDescription, kOsAll,
+      FEATURE_VALUE_TYPE(features::kWebAuthConditionalUI)},
+diff --git a/chrome/browser/flag_descriptions.cc b/chrome/browser/flag_descriptions.cc
+index 440f8d2cef5d1..fc80ccc60444b 100644
+--- a/chrome/browser/flag_descriptions.cc
++++ b/chrome/browser/flag_descriptions.cc
+@@ -2701,6 +2701,11 @@ const char kSyncAccessHandleAllSyncSurfaceName[] =
+ const char kSyncAccessHandleAllSyncSurfaceDescription[] =
+     "Enables all-sync surface for SyncAccessHandle in File System Access API.";
+ 
++const char kDisableAriaHiddenName[] =
++    "Disable aria-hidden";
++const char kDisableAriaHiddenDescription[] =
++    "Disable aria-hidden attribute to allow accessibility service to access all subtrees.";
++
+ const char kSyncEnableHistoryDataTypeName[] = "Enable History sync data type";
+ const char kSyncEnableHistoryDataTypeDescription[] =
+     "Enables the History sync data type instead of TypedURLs";
+diff --git a/chrome/browser/flag_descriptions.h b/chrome/browser/flag_descriptions.h
+index 54fcb42a83a33..c38217dc23534 100644
+--- a/chrome/browser/flag_descriptions.h
++++ b/chrome/browser/flag_descriptions.h
+@@ -1521,6 +1521,9 @@ extern const char kSuggestionsWithSubStringMatchDescription[];
+ extern const char kSyncAccessHandleAllSyncSurfaceName[];
+ extern const char kSyncAccessHandleAllSyncSurfaceDescription[];
+ 
++extern const char kDisableAriaHiddenName[];
++extern const char kDisableAriaHiddenDescription[];
++
+ extern const char kSyncEnableHistoryDataTypeName[];
+ extern const char kSyncEnableHistoryDataTypeDescription[];
+ 
+diff --git a/third_party/blink/common/features.cc b/third_party/blink/common/features.cc
+index e3c1a938e7b87..6187d2bf86311 100644
+--- a/third_party/blink/common/features.cc
++++ b/third_party/blink/common/features.cc
+@@ -1647,5 +1647,8 @@ const base::Feature kWebRtcMetronome{"WebRtcMetronome",
+ const base::Feature kSyncAccessHandleAllSyncSurface{
+     "SyncAccessHandleAllSyncSurface", base::FEATURE_DISABLED_BY_DEFAULT};
+ 
++const base::Feature kDisableAriaHidden{
++    "DisableAriaHidden", base::FEATURE_ENABLED_BY_DEFAULT};
++
+ }  // namespace features
+ }  // namespace blink
+diff --git a/third_party/blink/public/common/features.h b/third_party/blink/public/common/features.h
+index ef853bcc3d432..1c9cee7dda1e9 100644
+--- a/third_party/blink/public/common/features.h
++++ b/third_party/blink/public/common/features.h
+@@ -904,6 +904,9 @@ BLINK_COMMON_EXPORT extern const base::Feature kWebRtcMetronome;
+ // If enabled, all of FileSystemAccessSyncAccessHandle methods are synchronous.
+ BLINK_COMMON_EXPORT extern const base::Feature kSyncAccessHandleAllSyncSurface;
+ 
++// If enabled, aria-hidden will be disabled
++BLINK_COMMON_EXPORT extern const base::Feature kDisableAriaHidden;
++
+ }  // namespace features
+ }  // namespace blink
+ 
+diff --git a/third_party/blink/renderer/core/aom/accessible_node.cc b/third_party/blink/renderer/core/aom/accessible_node.cc
+index 0be1cbdb06834..81795ac63e334 100644
+--- a/third_party/blink/renderer/core/aom/accessible_node.cc
++++ b/third_party/blink/renderer/core/aom/accessible_node.cc
+@@ -16,6 +16,7 @@
+ #include "third_party/blink/renderer/core/page/page.h"
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+ #include "third_party/blink/renderer/platform/weborigin/security_origin.h"
++#include "third_party/blink/public/common/features.h"
+ 
+ namespace blink {
+ 
+@@ -402,6 +403,11 @@ bool AccessibleNode::GetPropertyOrARIAAttribute(
+ bool AccessibleNode::GetPropertyOrARIAAttribute(Element* element,
+                                                 AOMBooleanProperty property,
+                                                 bool& is_null) {
++  // Diable aria-hidden
++  if (property == AOMBooleanProperty::kHidden)
++    if (base::FeatureList::IsEnabled(blink::features::kDisableAriaHidden))
++      return false;
++
+   is_null = true;
+   if (!element)
+     return false;
+diff --git a/tools/metrics/histograms/enums.xml b/tools/metrics/histograms/enums.xml
+index 29b1e845c209e..11eca6f680303 100644
+--- a/tools/metrics/histograms/enums.xml
++++ b/tools/metrics/histograms/enums.xml
+@@ -60424,6 +60424,7 @@ from previous Chrome versions.
+   <int value="505381354" label="FastCheckout:enabled"/>
+   <int value="505561325" label="OpenXR:disabled"/>
+   <int value="505804530" label="SyncAccessHandleAllSyncSurface:disabled"/>
++  <int value="-912466406" label="DisableAriaHidden:disabled"/>
+   <int value="506015849" label="OmniboxFuzzyUrlSuggestions:disabled"/>
+   <int value="506680761" label="WebNFC:disabled"/>
+   <int value="508272289" label="SharedHighlightingAmp:disabled"/>
+@@ -61605,6 +61606,7 @@ from previous Chrome versions.
+   <int value="1236772382" label="BiometricAuthenticationInSettings:disabled"/>
+   <int value="1237297772" label="no-pings"/>
+   <int value="1237574783" label="SyncAccessHandleAllSyncSurface:enabled"/>
++  <int value="-1653148036" label="DisableAriaHidden:enabled"/>
+   <int value="1237659269"
+       label="OmniboxHistoryQuickProviderAllowButDoNotScoreMidwordTerms:enabled"/>
+   <int value="1238190462" label="PerDeskShelf:disabled"/>
